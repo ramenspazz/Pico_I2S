@@ -168,7 +168,7 @@ fn main() -> ! {
         "
         // use sideset to reduce the total memory footprint and maximum frequency possible
         .side_set 1
-        // output rate of one data bit per low high-transition at the sideset pin
+        // output rate of one flip per two ticks
         loop:
             // output data from the osr to GIPO pin 9 and side set pin 10
             // after 32 operations of this, the osr will be refilled
