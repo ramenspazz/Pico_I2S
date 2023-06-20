@@ -56,7 +56,7 @@ enum SampleFrequency {
 /// # Purpose
 /// Casts at the byte level an i32 into an equivalent byte level
 /// representation of the i32 but now stored into a u32 and padded to fit a 32bit size.
-fn cast_to_u32_as_i32(num: i32) -> u32 {
+fn cast_to_u32_as_i32(num: i32, is_24bit: bool) -> u32 {
     // we need to allow overflow in the case that the MSB is the only active bit
     // in the number, as the data format expected by the PCM510xA audio stereo DAC
     #[allow(overflowing_literals)]
@@ -64,31 +64,35 @@ fn cast_to_u32_as_i32(num: i32) -> u32 {
     let bytes_ptr: *const u8 = &num as *const i32 as *const u8;
 
     // Process all bytes but the last.
-    for i in 0..3 {
+    let byte_count = if is_24bit { 3 } else { 4 };
+    for i in 0..byte_count {
         let cur_byte: u8;
         unsafe {
             cur_byte = *bytes_ptr.offset(i as isize);
         }
 
-	temp |= (cur_byte as u32) << (8 * i);
+        temp |= (cur_byte as u32) << (8 * i);
     }
 
-    // Process the last byte
-    let cur_byte: u8;
-    unsafe {
-	cur_byte = *bytes_ptr.offset(3);
-    }
-    let msb_removed_byte: u8 = cur_byte & 0x7F;
-    temp |= (msb_removed_byte as u32) << 24;
+    // Process the last byte if it's 24-bit data
+    if is_24bit {
+        let cur_byte: u8;
+        unsafe {
+            cur_byte = *bytes_ptr.offset(3);
+        }
+        let msb_removed_byte: u8 = cur_byte & 0x7F;
+        temp |= (msb_removed_byte as u32) << 24;
 
-    // Add back in the MSB `num` to `temp`
-    if (cur_byte & 0x80) == 0x80 {
-        // The MSB was a 1, add it back to the final number
-        temp |= 0x8000_0000;
+        // Add back in the MSB `num` to `temp`
+        if (cur_byte & 0x80) == 0x80 {
+            // The MSB was a 1, add it back to the final number
+            temp |= 0x8000_0000;
+        }
     }
 
     temp
 }
+
 
 /// # Purpose
 /// A function to bitreverse a number for sending little endian to a big endian style machine
@@ -127,7 +131,7 @@ fn generate_sine_wave(samples: &mut [u32]) {
             out_temp += angle_temp * angle * angle / 120.;
             out_temp
         }) as i32;
-        samples[i] = bit_reverse(cast_to_u32_as_i32(sample));
+        samples[i] = bit_reverse(cast_to_u32_as_i32(sample, true));
     }
 }
 
@@ -178,7 +182,7 @@ fn main() -> ! {
     // needed data rate, so we need to set the clock to match.
     // The clock divider: "The clock is based on the sys_clk and will execute an instruction every int + (frac/256) ticks."
     // From this, the tick rate is 0.5bits/tick * 125(mbit/s) / (int + frac/256)(bit/tick) = 192kbit/s
-    // => 0.5*125E06/(int + frac/256) * bit/s = 192kbit/s giving and and int+frac/256 that must be aprox 325.521.
+    // => 0.5*125E06/(int + frac/256) * bit/s = 192kbit/s giving int+frac/256 must be aprox 325.521.
     let program_1 = pio_proc::pio_asm!(
         "
         .side_set 1
@@ -209,8 +213,12 @@ fn main() -> ! {
     };
     // let freq_offset = 1.04; // This saves the tolerance (4%)
 
+    // clock divisor: 1/div (instructions/tick)
+    // effective clock rate of PIO: 125M ticks / second * (1/div) instructions / tick => CLOCK_EFF := 125E06/div (1/seconds)
+    // effective bit rate: CLOCK_EFF * 0.5 (transitions/tick) => 
+    // 
     let lrck_div = 0.5 * BASE_CLOCK / lrck_freq;
-    let bck_data_div = lrck_div * 64_f32; // this comes from table 11 of the PCM510xA datasheet
+    let bck_data_div = lrck_div / 64_f32; // this comes from table 11 of the PCM510xA datasheet
     
     // the clock divisor requires a whole and fractional divisor, so we calculate them here
     let (bck_whole, bck_frac) = split_float!(bck_data_div);
