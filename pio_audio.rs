@@ -16,19 +16,27 @@ use rp2040_hal as hal;
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
+// constants
+const BASE_CLOCK: f32 = 125E06;
+const TABLE_SIZE: usize = 250;
+const AMPLITUDE: i32 = 0x7FFFFF;
+const FREQUENCY: f32 = 100.0;
+const SAMPLE_RATE: f32 = 192_000.0;
+const PI: f32 = 3.141592653589732385;
+
 /// macro to split a 32bit floating point number into a u16 whole number portion and a
 /// u8 fractional prortion, returned as a tuple.
 macro_rules! split_float {
     ($value:expr) => {{
         let whole = $value as u16;
-        let frac = (($value - whole as f32) * 255.0) as u8; // TODO: I suspect this might need to be changed to 256.0
+        let frac = (($value - whole as f32) * 256.0) as u8; // TODO: I suspect this might need to be changed to 256.0
         (whole, frac)
     }};
 }
 
 /// # Purose
 /// Represents the lrck sample frequency to use, represented as its own data type to prevent
-/// comparisons to floats where ever possible.
+/// comparisons to numbers where ever possible.
 /// # Members
 /// - Freq32khz:    32khz lrck signal
 /// - Freq44_1khz:  44.1khz lrck signal
@@ -99,11 +107,6 @@ fn bit_reverse(mut num: u32) -> u32 {
     rev_num
 }
 
-const TABLE_SIZE: usize = 250;
-const AMPLITUDE: i32 = 0x7FFFFF;
-const FREQUENCY: f32 = 100.0;
-const SAMPLE_RATE: f32 = 192_000.0;
-
 /// # Purpose
 /// Generates an array of u32 samples that represent an i32 value at the byte level
 /// 
@@ -112,7 +115,7 @@ const SAMPLE_RATE: f32 = 192_000.0;
 /// is no problem with the unsafe nature of these operations and their resulting use for
 /// this specific use case but should not in general be done.
 fn generate_sine_wave(samples: &mut [u32]) {
-    let omega = 2.0 * 3.1415926535897 * FREQUENCY / SAMPLE_RATE;
+    let omega = 2.0 * PI * FREQUENCY / SAMPLE_RATE;
     for i in 0..TABLE_SIZE {
         let angle = omega * i as f32;
         let sample = (AMPLITUDE as f32 * {
@@ -187,7 +190,6 @@ fn main() -> ! {
     
     // Initialize and start PIO
     let (mut pio, sm0, sm1, _, _) = pac.PIO0.split(&mut pac.RESETS);
-    let base_clock = 125E06_f32; // Hz
     let target_lrck_freq = SampleFrequency::Freq192khz; // TODO: hardcoded for now, selection comes later
     
     // Find the appropriate BCK range for the desired LRCK frequency.
@@ -207,16 +209,17 @@ fn main() -> ! {
     };
     // let freq_offset = 1.04; // This saves the tolerance (4%)
 
-    let lrck_div = 2.0 * (base_clock as f32) / lrck_freq;
-    let bck_data_div = lrck_div * 64_f32;
+    let lrck_div = 0.5 * BASE_CLOCK / lrck_freq;
+    let bck_data_div = lrck_div * 64_f32; // this comes from table 11 of the PCM510xA datasheet
     
+    // the clock divisor requires a whole and fractional divisor, so we calculate them here
     let (bck_whole, bck_frac) = split_float!(bck_data_div);
     let (lrck_whole, lrck_frac) = split_float!(lrck_div);
 
     // TODO: Calculate USB PLL settings for a UAC2 audio device
 
-    // Set up PIO programs and state machines
-    // install our PIO programs into the state machines and get a handle to the tx fifo on sm0.
+    // Set up the state machines by installing our PIO programs into the state machines and get a handle to the tx fifo on sm0
+    // for transitting data to the pio from the usb line.
     let installed = pio.install(&program_0.program).unwrap();
     let (mut sm0, _, mut tx0) = rp2040_hal::pio::PIOBuilder::from_program(installed)
         .set_pins(pin9_i2s_data, 1)
