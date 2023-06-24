@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::blocking::delay::DelayMs;
 use hal::gpio::{FunctionPio0, Pin};
 use hal::pac;
 use hal::pio::PIOExt;
@@ -17,12 +18,14 @@ use rp2040_hal as hal;
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
 // constants
+const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 const BASE_CLOCK: f32 = 125E06;
-const TABLE_SIZE: usize = 250;
-const AMPLITUDE: i32 = 0x7FFFFF;
-const FREQUENCY: f32 = 100.0;
+const TABLE_SIZE: usize = 1920;
+const AMPLITUDE: i32 = 0x6FFFFF;
+const FREQUENCY: f32 = 300.0;
 const SAMPLE_RATE: f32 = 192_000.0;
 const PI: f32 = 3.141592653589732385;
+const BITSHIFT_ONE_BYTE: u8 = 8;
 
 /// macro to split a 32bit floating point number into a u16 whole number portion and a
 /// u8 fractional prortion, returned as a tuple.
@@ -70,8 +73,8 @@ fn cast_to_u32_as_i32(num: i32, is_24bit: bool) -> u32 {
         unsafe {
             cur_byte = *bytes_ptr.offset(i as isize);
         }
-
-        temp |= (cur_byte as u32) << (8 * i);
+        
+        temp |= (cur_byte as u32) << (BITSHIFT_ONE_BYTE * i);
     }
 
     // Process the last byte if it's 24-bit data
@@ -131,6 +134,7 @@ fn generate_sine_wave(samples: &mut [u32]) {
             out_temp += angle_temp * angle * angle / 120.;
             out_temp
         }) as i32;
+        // samples[i] = cast_to_u32_as_i32(sample, true);
         samples[i] = bit_reverse(cast_to_u32_as_i32(sample, true));
     }
 }
@@ -149,10 +153,7 @@ fn main() -> ! {
     );
 
     // configure pins for Pio
-    let _dat_pin: Pin<_, FunctionPio0, _> = pins.gpio9.into_function();
-    let _bck_pin: Pin<_, FunctionPio0, _> = pins.gpio10.into_function();
-    let _lrck_pin: Pin<_, FunctionPio0, _> = pins.gpio11.into_function();
-    // let led_pin: Pin<_, FunctionPio0, _> = pins.gpio25.into_function();
+    let mut led_pin = pins.gpio25.into_push_pull_output();
 
     // PIN id for use inside of PIO
     let pin9_i2s_data: u8 = 0x9;
@@ -168,12 +169,13 @@ fn main() -> ! {
         "
         // use sideset to reduce the total memory footprint and maximum frequency possible
         .side_set 1
-        // output rate of one flip per two ticks
         loop:
             // output data from the osr to GIPO pin 9 and side set pin 10
             // after 32 operations of this, the osr will be refilled
-            out pins, 1     side 0
-            jmp loop        side 1
+            pull ifempty noblock    side 0
+            nop                     side 0
+            out pins, 1             side 1
+            jmp loop                side 1
         "
     );
     
@@ -187,8 +189,8 @@ fn main() -> ! {
         "
         .side_set 1
         loop:
-            nop         side 0
-            jmp loop    side 1
+            nop         side 1
+            jmp loop    side 0
         "
     );
     
@@ -217,8 +219,8 @@ fn main() -> ! {
     // effective clock rate of PIO: 125M ticks / second * (1/div) instructions / tick => CLOCK_EFF := 125E06/div (1/seconds)
     // effective bit rate: CLOCK_EFF * 0.5 (transitions/tick) => 
     // 
-    let lrck_div = 0.5 * BASE_CLOCK / lrck_freq;
-    let bck_data_div = lrck_div / 64_f32; // this comes from table 11 of the PCM510xA datasheet
+    let lrck_div = (BASE_CLOCK / 2.0) / lrck_freq;
+    let bck_data_div = (64.0 * BASE_CLOCK / 4.0) / lrck_freq; // this comes from table 11 of the PCM510xA datasheet
     
     // the clock divisor requires a whole and fractional divisor, so we calculate them here
     let (bck_whole, bck_frac) = split_float!(bck_data_div);
@@ -250,16 +252,34 @@ fn main() -> ! {
 
     let mut samples = [0; TABLE_SIZE];
     generate_sine_wave(&mut samples);
-    let mut ledpin = pins.gpio25.into_push_pull_output();
-    ledpin.set_high().unwrap();
+    led_pin.set_high().unwrap();
+
+    // Set up the watchdog driver - needed by the clock setup code
+    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
+    // Configure the clocks
+    let clocks = hal::clocks::init_clocks_and_plls(
+        XTAL_FREQ_HZ,
+        pac.XOSC,
+        pac.CLOCKS,
+        pac.PLL_SYS,
+        pac.PLL_USB,
+        &mut pac.RESETS,
+        &mut watchdog,
+    )
+    .ok()
+    .unwrap();
+
+    let mut timer = rp2040_hal::Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
 
     // Start both SMs at the same time
     let _group = sm0.with(sm1).sync().start();
+    timer.delay_ms(500);
 
     // Write data to the TX FIFO    
     #[allow(clippy::empty_loop)]
     loop {
         for sample in samples.iter() {
+            while tx0.is_full() {}
             tx0.write(*sample);
         }        
     }
