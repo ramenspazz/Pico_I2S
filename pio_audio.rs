@@ -154,11 +154,14 @@ fn main() -> ! {
 
     // configure pins for Pio
     let mut led_pin = pins.gpio25.into_push_pull_output();
+    let i2s_data: Pin<_, FunctionPio0, _> = pins.gpio9.into_function();
+    let i2s_bck: Pin<_, FunctionPio0, _> = pins.gpio10.into_function();
+    let i2s_lrck: Pin<_, FunctionPio0, _> = pins.gpio11.into_function();
 
     // PIN id for use inside of PIO
-    let pin9_i2s_data: u8 = 0x9;
-    let pin10_i2s_bck: u8 = 0xA;
-    let pin11_i2s_lrck: u8 = 0xB;
+    let pin9_i2s_data = i2s_data.id().num;
+    let pin10_i2s_bck: u8 = i2s_bck.id().num;
+    let pin11_i2s_lrck: u8 = i2s_lrck.id().num;
     let _pin25_led: u8 = 0x19;
 
     // PIO program to output the data and bck signal together.
@@ -203,7 +206,7 @@ fn main() -> ! {
     // All frequencies are pulled from Table 11. BCK Rates (MHz) by LRCK Sample Rate for PCM510xA PLL Operation
     // From the "PCM510xA 2.1 VRMS, 112/106/100 dB Audio Stereo DAC with PLL and 32-bit, 384 kHz PCM Interface" data sheet
     // We are going to use a BCK frequency at 64 times the lrck signal. The PCM5100A will accept 32 or 64 times the sampling rate.
-    let (lrck_freq, _bck_freq): (f32, f32) = {
+    let (lrck_freq, bck_freq): (f32, f32) = {
         match target_lrck_freq {
             SampleFrequency::Freq32khz => (32_000f32, 1.024E06_f32),
             SampleFrequency::Freq44_1khz => (44_100f32, 1.4112E06_f32),
@@ -219,8 +222,10 @@ fn main() -> ! {
     // effective clock rate of PIO: 125M ticks / second * (1/div) instructions / tick => CLOCK_EFF := 125E06/div (1/seconds)
     // effective bit rate: CLOCK_EFF * 0.5 (transitions/tick) => 
     // 
-    let lrck_div = (BASE_CLOCK / 2.0) / lrck_freq;
-    let bck_data_div = (64.0 * BASE_CLOCK / 4.0) / lrck_freq; // this comes from table 11 of the PCM510xA datasheet
+    let LRCK_PIO_CYCLES_PER = 2.0f32;
+    let CK_PIO_CYCLES_PER = 4.0f32;
+    let lrck_div = (BASE_CLOCK / LRCK_PIO_CYCLES_PER) / lrck_freq;
+    let bck_data_div = (BASE_CLOCK / CK_PIO_CYCLES_PER) / bck_freq;
     
     // the clock divisor requires a whole and fractional divisor, so we calculate them here
     let (bck_whole, bck_frac) = split_float!(bck_data_div);
@@ -232,7 +237,7 @@ fn main() -> ! {
     // for transitting data to the pio from the usb line.
     let installed = pio.install(&program_0.program).unwrap();
     let (mut sm0, _, mut tx0) = rp2040_hal::pio::PIOBuilder::from_program(installed)
-        .set_pins(pin9_i2s_data, 1)
+        .out_pins(pin9_i2s_data, 1)
         .side_set_pin_base(pin10_i2s_bck)
         .clock_divisor_fixed_point(bck_whole, bck_frac)
         .pull_threshold(0)
